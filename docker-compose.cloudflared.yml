@@ -1,0 +1,20 @@
+# OpenWA - Cloudflared Tunnel (optional)
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.cloudflared.yml --profile cloudflared up -d
+
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: openwa-cloudflared
+    profiles: ["cloudflared"]
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARED_TUNNEL_TOKEN}
+    labels:
+      - "com.openwa.service=tunnel"
+      - "com.openwa.optional=true"
+
+networks:
+  default:
+    name: openwa-network
