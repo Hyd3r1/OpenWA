@@ -145,7 +145,7 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
       try {
         const isGroupMessage = msg.from.endsWith('@g.us');
         const groupAuthor = (msg as unknown as { author?: string }).author;
-        const userId = isGroupMessage ? (groupAuthor || msg.from) : msg.from;
+        const userId = isGroupMessage ? groupAuthor || msg.from : msg.from;
 
         const incomingMessage: IncomingMessage = {
           id: msg.id._serialized,

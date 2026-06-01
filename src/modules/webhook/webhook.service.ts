@@ -405,9 +405,7 @@ export class WebhookService {
 
   private normalizeHeaders(value: unknown): Record<string, string> {
     if (value && typeof value === 'object' && !Array.isArray(value)) {
-      return Object.fromEntries(
-        Object.entries(value as Record<string, unknown>).map(([k, v]) => [k, String(v)]),
-      );
+      return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([k, v]) => [k, String(v)]));
     }
 
     if (typeof value === 'string') {
@@ -419,9 +417,7 @@ export class WebhookService {
       try {
         const parsed: unknown = JSON.parse(trimmed);
         if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-          return Object.fromEntries(
-            Object.entries(parsed as Record<string, unknown>).map(([k, v]) => [k, String(v)]),
-          );
+          return Object.fromEntries(Object.entries(parsed as Record<string, unknown>).map(([k, v]) => [k, String(v)]));
         }
       } catch {
         return {};
