@@ -145,6 +145,20 @@ describe('WebhookService', () => {
 
       expect(repository.find).toHaveBeenCalledWith({ order: { createdAt: 'DESC' } });
     });
+
+    it('should normalize stringified events and headers from database rows', async () => {
+      (repository.find as jest.Mock).mockResolvedValue([
+        createMockWebhook({
+          events: '["message.received","session.status"]' as unknown as string[],
+          headers: '{"X-Test":"1"}' as unknown as Record<string, string>,
+        }),
+      ]);
+
+      const [result] = await service.findAll();
+
+      expect(result.events).toEqual(['message.received', 'session.status']);
+      expect(result.headers).toEqual({ 'X-Test': '1' });
+    });
   });
 
   describe('findOne', () => {
@@ -282,6 +296,35 @@ describe('WebhookService', () => {
       await service.dispatch('sess-1', 'message.received', {});
 
       expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('should dispatch when webhook events are stored as a string', async () => {
+      const webhook = createMockWebhook({
+        events: '["message.received"]' as unknown as string[],
+      });
+      (repository.find as jest.Mock).mockResolvedValue([webhook]);
+      (repository.update as jest.Mock).mockResolvedValue({ affected: 1 });
+
+      const payload: WebhookPayload = {
+        event: 'message.received',
+        timestamp: new Date().toISOString(),
+        sessionId: 'sess-1',
+        idempotencyKey: 'test-key',
+        deliveryId: 'test-delivery',
+        data: { from: '628123456789@c.us' },
+      };
+      (hookManager.execute as jest.Mock).mockResolvedValue({
+        continue: true,
+        data: {
+          sessionId: 'sess-1',
+          event: 'message.received',
+          payload,
+        },
+      });
+
+      await service.dispatch('sess-1', 'message.received', { from: '628123456789@c.us' });
+
+      expect(mockFetch).toHaveBeenCalled();
     });
   });
 

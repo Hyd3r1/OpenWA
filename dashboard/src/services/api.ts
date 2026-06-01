@@ -38,6 +38,10 @@ export interface Webhook {
   updatedAt: string;
 }
 
+type WebhookApiResponse = Omit<Webhook, 'events'> & {
+  events: string[] | string | null | undefined;
+};
+
 export interface ApiKey {
   id: string;
   name: string;
@@ -171,6 +175,39 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
   return response.json();
 }
 
+function normalizeWebhookEvents(events: WebhookApiResponse['events']): string[] {
+  if (Array.isArray(events)) {
+    return events.filter((event): event is string => typeof event === 'string' && event.trim().length > 0);
+  }
+
+  if (typeof events === 'string') {
+    const trimmed = events.trim();
+    if (!trimmed) {
+      return ['message.received'];
+    }
+
+    try {
+      const parsed: unknown = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) {
+        return parsed.filter((event): event is string => typeof event === 'string' && event.trim().length > 0);
+      }
+    } catch {
+      // Fall through to single-event fallback.
+    }
+
+    return [trimmed];
+  }
+
+  return ['message.received'];
+}
+
+function normalizeWebhook(webhook: WebhookApiResponse): Webhook {
+  return {
+    ...webhook,
+    events: normalizeWebhookEvents(webhook.events),
+  };
+}
+
 // =============================================================================
 // Session API
 // =============================================================================
@@ -196,19 +233,21 @@ export const sessionApi = {
 // =============================================================================
 
 export const webhookApi = {
-  listBySession: (sessionId: string) => request<Webhook[]>(`/sessions/${sessionId}/webhooks`),
-  listAll: () => request<Webhook[]>('/webhooks'),
-  get: (sessionId: string, id: string) => request<Webhook>(`/sessions/${sessionId}/webhooks/${id}`),
+  listBySession: (sessionId: string) =>
+    request<WebhookApiResponse[]>(`/sessions/${sessionId}/webhooks`).then(items => items.map(normalizeWebhook)),
+  listAll: () => request<WebhookApiResponse[]>('/webhooks').then(items => items.map(normalizeWebhook)),
+  get: (sessionId: string, id: string) =>
+    request<WebhookApiResponse>(`/sessions/${sessionId}/webhooks/${id}`).then(normalizeWebhook),
   create: (sessionId: string, data: { url: string; events: string[] }) =>
-    request<Webhook>(`/sessions/${sessionId}/webhooks`, {
+    request<WebhookApiResponse>(`/sessions/${sessionId}/webhooks`, {
       method: 'POST',
       body: JSON.stringify(data),
-    }),
+    }).then(normalizeWebhook),
   update: (sessionId: string, id: string, data: Partial<Webhook>) =>
-    request<Webhook>(`/sessions/${sessionId}/webhooks/${id}`, {
+    request<WebhookApiResponse>(`/sessions/${sessionId}/webhooks/${id}`, {
       method: 'PUT',
       body: JSON.stringify(data),
-    }),
+    }).then(normalizeWebhook),
   delete: (sessionId: string, id: string) =>
     request<void>(`/sessions/${sessionId}/webhooks/${id}`, { method: 'DELETE' }),
   test: (sessionId: string, id: string) =>

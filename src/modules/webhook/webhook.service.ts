@@ -59,20 +59,25 @@ export class WebhookService {
       retryCount: dto.retryCount ?? 3,
     });
 
-    return this.webhookRepository.save(webhook);
+    const saved = await this.webhookRepository.save(webhook);
+    return this.normalizeWebhook(saved);
   }
 
   async findBySession(sessionId: string): Promise<Webhook[]> {
-    return this.webhookRepository.find({
+    const webhooks = await this.webhookRepository.find({
       where: { sessionId },
       order: { createdAt: 'DESC' },
     });
+
+    return webhooks.map(webhook => this.normalizeWebhook(webhook));
   }
 
   async findAll(): Promise<Webhook[]> {
-    return this.webhookRepository.find({
+    const webhooks = await this.webhookRepository.find({
       order: { createdAt: 'DESC' },
     });
+
+    return webhooks.map(webhook => this.normalizeWebhook(webhook));
   }
 
   async findOne(id: string): Promise<Webhook> {
@@ -80,7 +85,7 @@ export class WebhookService {
     if (!webhook) {
       throw new NotFoundException(`Webhook with id '${id}' not found`);
     }
-    return webhook;
+    return this.normalizeWebhook(webhook);
   }
 
   async update(id: string, dto: UpdateWebhookDto): Promise<Webhook> {
@@ -93,7 +98,8 @@ export class WebhookService {
     if (dto.active !== undefined) webhook.active = dto.active;
     if (dto.retryCount !== undefined) webhook.retryCount = dto.retryCount;
 
-    return this.webhookRepository.save(webhook);
+    const saved = await this.webhookRepository.save(webhook);
+    return this.normalizeWebhook(saved);
   }
 
   async delete(id: string): Promise<void> {
@@ -157,7 +163,9 @@ export class WebhookService {
       where: { sessionId, active: true },
     });
 
-    const matchingWebhooks = webhooks.filter(w => w.events.includes(event) || w.events.includes('*'));
+    const normalizedWebhooks = webhooks.map(webhook => this.normalizeWebhook(webhook));
+
+    const matchingWebhooks = normalizedWebhooks.filter(w => w.events.includes(event) || w.events.includes('*'));
 
     // Generate idempotency key (same for all webhooks receiving this event)
     const idempotencyKey = generateIdempotencyKey(event, { ...data, sessionId });
@@ -361,5 +369,65 @@ export class WebhookService {
 
   private delay(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  private normalizeWebhook(webhook: Webhook): Webhook {
+    webhook.events = this.normalizeEvents(webhook.events);
+    webhook.headers = this.normalizeHeaders(webhook.headers);
+    return webhook;
+  }
+
+  private normalizeEvents(value: unknown): string[] {
+    if (Array.isArray(value)) {
+      return value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
+    }
+
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (!trimmed) {
+        return ['message.received'];
+      }
+
+      try {
+        const parsed: unknown = JSON.parse(trimmed);
+        if (Array.isArray(parsed)) {
+          return parsed.filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
+        }
+      } catch {
+        // Fall through to plain string fallback.
+      }
+
+      return [trimmed];
+    }
+
+    return ['message.received'];
+  }
+
+  private normalizeHeaders(value: unknown): Record<string, string> {
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      return Object.fromEntries(
+        Object.entries(value as Record<string, unknown>).map(([k, v]) => [k, String(v)]),
+      );
+    }
+
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (!trimmed) {
+        return {};
+      }
+
+      try {
+        const parsed: unknown = JSON.parse(trimmed);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          return Object.fromEntries(
+            Object.entries(parsed as Record<string, unknown>).map(([k, v]) => [k, String(v)]),
+          );
+        }
+      } catch {
+        return {};
+      }
+    }
+
+    return {};
   }
 }
