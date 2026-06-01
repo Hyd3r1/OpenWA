@@ -458,13 +458,12 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
 
   async replyToMessage(chatId: string, quotedMsgId: string, text: string): Promise<MessageResult> {
     this.ensureReady();
-    // Find the message to quote
-    const chat = await this.client!.getChatById(chatId);
-    const messages = await chat.fetchMessages({ limit: 100 });
-    const quotedMsg = messages.find(m => m.id._serialized === quotedMsgId);
+    // Find the message to quote. We scan progressively larger windows so
+    // replies can target older messages, not only the latest 100.
+    const quotedMsg = await this.findMessageInChat(chatId, quotedMsgId);
 
     if (!quotedMsg) {
-      throw new Error(`Message ${quotedMsgId} not found`);
+      throw new Error(`Message ${quotedMsgId} not found in chat ${chatId}`);
     }
 
     const msg = await quotedMsg.reply(text);
@@ -476,12 +475,10 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
 
   async forwardMessage(fromChatId: string, toChatId: string, messageId: string): Promise<MessageResult> {
     this.ensureReady();
-    const chat = await this.client!.getChatById(fromChatId);
-    const messages = await chat.fetchMessages({ limit: 100 });
-    const msgToForward = messages.find(m => m.id._serialized === messageId);
+    const msgToForward = await this.findMessageInChat(fromChatId, messageId);
 
     if (!msgToForward) {
-      throw new Error(`Message ${messageId} not found`);
+      throw new Error(`Message ${messageId} not found in chat ${fromChatId}`);
     }
 
     await msgToForward.forward(toChatId);
@@ -524,6 +521,31 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
       this.logger.warn(`Failed to get group: ${groupId}`, String(error));
       return null;
     }
+  }
+
+  private async findMessageInChat(
+    chatId: string,
+    messageId: string,
+  ): Promise<(MessageWithReactions & { id: { _serialized: string } }) | null> {
+    const chat = await this.client!.getChatById(chatId);
+    const scanLimits = [100, 500, 2000];
+
+    for (const limit of scanLimits) {
+      const messages = (await chat.fetchMessages({ limit })) as Array<{
+        id?: {
+          _serialized?: string;
+          id?: string;
+        };
+      }>;
+
+      const found = messages.find(m => m.id?._serialized === messageId || m.id?.id === messageId);
+
+      if (found) {
+        return found as MessageWithReactions & { id: { _serialized: string } };
+      }
+    }
+
+    return null;
   }
 
   async createGroup(name: string, participants: string[]): Promise<Group> {

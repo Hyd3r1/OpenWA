@@ -12,6 +12,7 @@ import { Session, SessionStatus } from './entities/session.entity';
 import { CreateSessionDto } from './dto';
 import { EngineFactory } from '../../engine/engine.factory';
 import { IWhatsAppEngine, EngineStatus } from '../../engine/interfaces/whatsapp-engine.interface';
+import { Message, MessageDirection, MessageStatus } from '../message/entities/message.entity';
 import { createLogger } from '../../common/services/logger.service';
 import { EventsGateway } from '../events/events.gateway';
 import { WebhookService } from '../webhook/webhook.service';
@@ -37,6 +38,8 @@ export class SessionService implements OnModuleDestroy, OnModuleInit {
   constructor(
     @InjectRepository(Session, 'data')
     private readonly sessionRepository: Repository<Session>,
+    @InjectRepository(Message, 'data')
+    private readonly messageRepository: Repository<Message>,
     @InjectDataSource('data')
     private readonly dataSource: DataSource,
     private readonly engineFactory: EngineFactory,
@@ -306,6 +309,8 @@ export class SessionService implements OnModuleDestroy, OnModuleInit {
               return;
             }
 
+            void this.persistIncomingMessage(id, finalMessage as Record<string, unknown>);
+
             // Dispatch to webhooks with potentially modified message
             void this.webhookService.dispatch(id, 'message.received', finalMessage as Record<string, unknown>);
             // Emit real-time event to WebSocket clients
@@ -536,5 +541,69 @@ export class SessionService implements OnModuleDestroy, OnModuleInit {
    */
   isActive(id: string): boolean {
     return this.engines.has(id);
+  }
+
+  private async persistIncomingMessage(sessionId: string, payload: Record<string, unknown>): Promise<void> {
+    try {
+      const waMessageId = typeof payload.id === 'string' ? payload.id : null;
+      if (!waMessageId) {
+        return;
+      }
+
+      const existing = await this.messageRepository.findOne({
+        where: {
+          sessionId,
+          waMessageId,
+        },
+      });
+
+      if (existing) {
+        return;
+      }
+
+      const quoted =
+        payload.quotedMessage && typeof payload.quotedMessage === 'object'
+          ? (payload.quotedMessage as Record<string, unknown>)
+          : null;
+
+      const quotedMessageId =
+        typeof payload.quotedMessageId === 'string'
+          ? payload.quotedMessageId
+          : quoted && typeof quoted.id === 'string'
+            ? quoted.id
+            : null;
+
+      const chatId =
+        typeof payload.chatId === 'string'
+          ? payload.chatId
+          : typeof payload.from === 'string'
+            ? payload.from
+            : 'unknown';
+
+      const incoming = this.messageRepository.create({
+        sessionId,
+        waMessageId,
+        chatId,
+        from: typeof payload.from === 'string' ? payload.from : 'unknown',
+        to: typeof payload.to === 'string' ? payload.to : '',
+        body: typeof payload.body === 'string' ? payload.body : '',
+        type: typeof payload.type === 'string' ? payload.type : 'text',
+        direction: MessageDirection.INCOMING,
+        timestamp: typeof payload.timestamp === 'number' ? payload.timestamp : Date.now(),
+        status: MessageStatus.DELIVERED,
+        metadata: {
+          ...(payload as Record<string, unknown>),
+          hasReply: !!quotedMessageId,
+          quotedMessageId,
+        },
+      });
+
+      await this.messageRepository.save(incoming);
+    } catch (error) {
+      this.logger.warn('Failed to persist incoming message', {
+        sessionId,
+        error: String(error),
+      });
+    }
   }
 }

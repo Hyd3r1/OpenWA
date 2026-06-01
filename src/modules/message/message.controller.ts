@@ -38,6 +38,19 @@ export class MessageController {
     });
   }
 
+  @Get(':messageId')
+  @ApiOperation({ summary: 'Get single message details by internal ID or WhatsApp message ID' })
+  @ApiParam({ name: 'sessionId', description: 'Session ID' })
+  @ApiParam({ name: 'messageId', description: 'Message UUID or waMessageId' })
+  @ApiResponse({
+    status: 200,
+    description: 'Message details including reply metadata',
+  })
+  @ApiResponse({ status: 404, description: 'Message not found' })
+  async getMessageById(@Param('sessionId') sessionId: string, @Param('messageId') messageId: string) {
+    return this.messageService.getMessageById(sessionId, messageId);
+  }
+
   @Post('send-text')
   @RequireRole(ApiKeyRole.OPERATOR)
   @ApiOperation({ summary: 'Send a text message' })
@@ -200,6 +213,26 @@ export class MessageController {
     @Body() dto: { chatId: string; quotedMessageId: string; text: string },
   ): Promise<MessageResponseDto> {
     return this.messageService.reply(sessionId, dto);
+  }
+
+  @Post('reply-by-id')
+  @RequireRole(ApiKeyRole.OPERATOR)
+  @ApiOperation({ summary: 'Reply to a specific message ID (chatId optional if message exists in history)' })
+  @ApiParam({ name: 'sessionId', description: 'Session ID' })
+  @ApiResponse({
+    status: 201,
+    description: 'Reply sent',
+    type: MessageResponseDto,
+  })
+  @ApiResponse({
+    status: 404,
+    description: 'Message not found (when chatId is not provided)',
+  })
+  async replyById(
+    @Param('sessionId') sessionId: string,
+    @Body() dto: { quotedMessageId: string; text: string; chatId?: string },
+  ): Promise<MessageResponseDto> {
+    return this.messageService.replyByMessageId(sessionId, dto);
   }
 
   @Post('forward')

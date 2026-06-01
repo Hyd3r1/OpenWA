@@ -1,4 +1,4 @@
-import { Injectable, BadRequestException } from '@nestjs/common';
+import { Injectable, BadRequestException, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { SessionService } from '../session/session.service';
@@ -229,6 +229,45 @@ export class MessageService {
     return { messages, total };
   }
 
+  async getMessageById(
+    sessionId: string,
+    messageId: string,
+  ): Promise<Message & { hasReply: boolean; quotedMessageId: string | null; quotedMessageBody: string | null }> {
+    const message = await this.messageRepository.findOne({
+      where: [
+        { sessionId, id: messageId },
+        { sessionId, waMessageId: messageId },
+      ],
+      order: { createdAt: 'DESC' },
+    });
+
+    if (!message) {
+      throw new NotFoundException(`Message '${messageId}' not found in session '${sessionId}'`);
+    }
+
+    const metadata = this.parseMetadata(message.metadata);
+    const quotedMessage =
+      metadata.quotedMessage && typeof metadata.quotedMessage === 'object'
+        ? (metadata.quotedMessage as Record<string, unknown>)
+        : null;
+
+    const quotedMessageId =
+      typeof metadata.quotedMessageId === 'string'
+        ? metadata.quotedMessageId
+        : quotedMessage && typeof quotedMessage.id === 'string'
+          ? quotedMessage.id
+          : null;
+
+    const quotedMessageBody = quotedMessage && typeof quotedMessage.body === 'string' ? quotedMessage.body : null;
+
+    return {
+      ...message,
+      hasReply: !!quotedMessageId,
+      quotedMessageId,
+      quotedMessageBody,
+    };
+  }
+
   // ========== Phase 3: Extended Messaging ==========
 
   async sendLocation(
@@ -355,6 +394,11 @@ export class MessageService {
       message.waMessageId = result.id;
       message.status = MessageStatus.SENT;
       message.timestamp = result.timestamp;
+      message.metadata = {
+        ...(message.metadata || {}),
+        hasReply: true,
+        quotedMessageId: dto.quotedMessageId,
+      };
       await this.messageRepository.save(message);
 
       return {
@@ -366,6 +410,41 @@ export class MessageService {
       await this.messageRepository.save(message);
       throw error;
     }
+  }
+
+  async replyByMessageId(
+    sessionId: string,
+    dto: { quotedMessageId: string; text: string; chatId?: string },
+  ): Promise<MessageResponseDto> {
+    let targetChatId = dto.chatId;
+
+    if (!targetChatId) {
+      const sourceMessage = await this.messageRepository.findOne({
+        where: [
+          { sessionId, waMessageId: dto.quotedMessageId },
+          { sessionId, id: dto.quotedMessageId },
+        ],
+        order: { createdAt: 'DESC' },
+      });
+
+      if (!sourceMessage?.chatId) {
+        throw new NotFoundException(
+          `Cannot resolve chat for message '${dto.quotedMessageId}'. Provide chatId or ensure message exists in history.`,
+        );
+      }
+
+      targetChatId = sourceMessage.chatId;
+    }
+
+    if (!targetChatId) {
+      throw new BadRequestException('chatId is required to reply to this message');
+    }
+
+    return this.reply(sessionId, {
+      chatId: targetChatId,
+      quotedMessageId: dto.quotedMessageId,
+      text: dto.text,
+    });
   }
 
   async forward(
@@ -489,5 +568,29 @@ export class MessageService {
       filename: dto.filename,
       caption: dto.caption,
     };
+  }
+
+  private parseMetadata(metadata: Record<string, unknown> | null | undefined): Record<string, unknown> {
+    if (!metadata) {
+      return {};
+    }
+
+    if (typeof metadata === 'string') {
+      try {
+        const parsed = JSON.parse(metadata) as unknown;
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          return parsed as Record<string, unknown>;
+        }
+      } catch {
+        return {};
+      }
+      return {};
+    }
+
+    if (typeof metadata === 'object' && !Array.isArray(metadata)) {
+      return metadata;
+    }
+
+    return {};
   }
 }
