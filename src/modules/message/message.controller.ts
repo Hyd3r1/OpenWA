@@ -2,7 +2,15 @@ import { Controller, Post, Get, Param, Body, Query, HttpCode, HttpStatus } from 
 import { ApiTags, ApiOperation, ApiResponse, ApiParam, ApiQuery } from '@nestjs/swagger';
 import { MessageService } from './message.service';
 import { BulkMessageService } from './bulk-message.service';
-import { SendTextMessageDto, SendMediaMessageDto, MessageResponseDto } from './dto';
+import {
+  SendTextMessageDto,
+  SendMediaMessageDto,
+  MessageResponseDto,
+  ReplyMessageDto,
+  ReplyByMessageIdDto,
+  ForwardMessageDto,
+  MessageDetailsResponseDto,
+} from './dto';
 import { SendBulkMessageDto, BulkMessageResponseDto } from './dto/bulk-message.dto';
 import { RequireRole } from '../auth/decorators/auth.decorators';
 import { ApiKeyRole } from '../auth/entities/api-key.entity';
@@ -45,6 +53,7 @@ export class MessageController {
   @ApiResponse({
     status: 200,
     description: 'Message details including reply metadata',
+    type: MessageDetailsResponseDto,
   })
   @ApiResponse({ status: 404, description: 'Message not found' })
   async getMessageById(@Param('sessionId') sessionId: string, @Param('messageId') messageId: string) {
@@ -210,7 +219,7 @@ export class MessageController {
   })
   async reply(
     @Param('sessionId') sessionId: string,
-    @Body() dto: { chatId: string; quotedMessageId: string; text: string },
+    @Body() dto: ReplyMessageDto,
   ): Promise<MessageResponseDto> {
     return this.messageService.reply(sessionId, dto);
   }
@@ -230,7 +239,7 @@ export class MessageController {
   })
   async replyById(
     @Param('sessionId') sessionId: string,
-    @Body() dto: { quotedMessageId: string; text: string; chatId?: string },
+    @Body() dto: ReplyByMessageIdDto,
   ): Promise<MessageResponseDto> {
     return this.messageService.replyByMessageId(sessionId, dto);
   }
@@ -246,7 +255,7 @@ export class MessageController {
   })
   async forward(
     @Param('sessionId') sessionId: string,
-    @Body() dto: { fromChatId: string; toChatId: string; messageId: string },
+    @Body() dto: ForwardMessageDto,
   ): Promise<MessageResponseDto> {
     return this.messageService.forward(sessionId, dto);
   }
