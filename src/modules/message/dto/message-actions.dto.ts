@@ -49,7 +49,8 @@ export class ReplyByMessageIdDto {
   text: string;
 
   @ApiPropertyOptional({
-    description: 'Target chat ID. Optional when quoted message exists in session history and chat can be resolved automatically.',
+    description:
+      'Target chat ID. Optional when quoted message exists in session history and chat can be resolved automatically.',
     example: '628123456789@c.us',
   })
   @IsOptional()

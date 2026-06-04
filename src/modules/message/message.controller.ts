@@ -217,10 +217,7 @@ export class MessageController {
     description: 'Reply sent',
     type: MessageResponseDto,
   })
-  async reply(
-    @Param('sessionId') sessionId: string,
-    @Body() dto: ReplyMessageDto,
-  ): Promise<MessageResponseDto> {
+  async reply(@Param('sessionId') sessionId: string, @Body() dto: ReplyMessageDto): Promise<MessageResponseDto> {
     return this.messageService.reply(sessionId, dto);
   }
 
@@ -253,10 +250,7 @@ export class MessageController {
     description: 'Message forwarded',
     type: MessageResponseDto,
   })
-  async forward(
-    @Param('sessionId') sessionId: string,
-    @Body() dto: ForwardMessageDto,
-  ): Promise<MessageResponseDto> {
+  async forward(@Param('sessionId') sessionId: string, @Body() dto: ForwardMessageDto): Promise<MessageResponseDto> {
     return this.messageService.forward(sessionId, dto);
   }
 
