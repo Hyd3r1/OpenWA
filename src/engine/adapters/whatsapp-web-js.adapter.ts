@@ -228,14 +228,15 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
       try {
         const isGroupMessage = msg.from.endsWith('@g.us');
         const groupAuthor = (msg as unknown as { author?: string }).author;
-        const userId = isGroupMessage ? groupAuthor || msg.from : msg.from;
+        const userId = isGroupMessage ? groupAuthor || null : msg.from;
+        const senderId = userId || 'unknown';
 
         const incomingMessage: IncomingMessage = {
           id: msg.id._serialized,
-          from: msg.from,
+          from: senderId,
           to: msg.to,
           chatId: msg.from,
-          userId,
+          userId: userId || undefined,
           author: groupAuthor || null,
           body: msg.body,
           type: msg.type,
@@ -246,12 +247,14 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
 
         // Attach sender metadata when available. For group messages this uses
         // the author id, so webhook consumers get the real sender details.
-        try {
-          const senderContact = await this.client!.getContactById(userId);
-          incomingMessage.contactName = senderContact.pushname || senderContact.name || undefined;
-          incomingMessage.contactNumber = senderContact.number || undefined;
-        } catch {
-          // Contact lookup is best-effort and should not block message processing.
+        if (userId) {
+          try {
+            const senderContact = await this.client!.getContactById(userId);
+            incomingMessage.contactName = senderContact.pushname || senderContact.name || undefined;
+            incomingMessage.contactNumber = senderContact.number || undefined;
+          } catch {
+            // Contact lookup is best-effort and should not block message processing.
+          }
         }
 
         // Handle media

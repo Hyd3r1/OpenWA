@@ -39,6 +39,8 @@ describe('MessageService', () => {
       create: jest.fn().mockImplementation((data: Partial<Message>) => ({ id: 'msg-uuid-1', ...data }) as Message),
       save: jest.fn().mockImplementation(msg => Promise.resolve(msg)),
       createQueryBuilder: jest.fn(),
+      findOne: jest.fn(),
+      find: jest.fn(),
     };
 
     mockEngine = createMockEngine();
@@ -308,6 +310,81 @@ describe('MessageService', () => {
           sessionId: 'sess-1',
           direction: MessageDirection.INCOMING,
         }),
+      );
+    });
+  });
+
+  // ── getMessageById ───────────────────────────────────────────────
+
+  describe('getMessageById', () => {
+    it('should normalize from for group messages to concrete sender', async () => {
+      (repository.findOne as jest.Mock).mockResolvedValue({
+        id: 'msg-group-1',
+        sessionId: 'sess-1',
+        chatId: '1203630@g.us',
+        from: '1203630@g.us',
+        metadata: { author: '628111222333@c.us' },
+      } as Message);
+
+      const result = await service.getMessageById('sess-1', 'msg-group-1');
+
+      expect(result.from).toBe('628111222333@c.us');
+    });
+  });
+
+  // ── getRepliesToMessage ──────────────────────────────────────────
+
+  describe('getRepliesToMessage', () => {
+    it('should return all messages that reply to target message', async () => {
+      const sourceMessage = {
+        id: 'msg-source-1',
+        sessionId: 'sess-1',
+        waMessageId: 'wa-source-1',
+        chatId: '1203630@g.us',
+        from: '1203630@g.us',
+        metadata: { userId: '628100000001@c.us' },
+      } as Message;
+
+      const unrelated = {
+        id: 'msg-other',
+        sessionId: 'sess-1',
+        metadata: { quotedMessageId: 'wa-something-else' },
+      } as Message;
+
+      const replyOne = {
+        id: 'msg-reply-1',
+        sessionId: 'sess-1',
+        chatId: '1203630@g.us',
+        from: '1203630@g.us',
+        metadata: { quotedMessageId: 'wa-source-1' },
+      } as Message;
+
+      const replyTwo = {
+        id: 'msg-reply-2',
+        sessionId: 'sess-1',
+        chatId: '1203630@g.us',
+        from: '1203630@g.us',
+        metadata: { quotedMessageId: 'msg-source-1', author: '628100000003@c.us' },
+      } as Message;
+
+      (repository.findOne as jest.Mock).mockResolvedValue(sourceMessage);
+      (repository.find as jest.Mock).mockResolvedValue([sourceMessage, unrelated, replyOne, replyTwo]);
+
+      const result = await service.getRepliesToMessage('sess-1', 'wa-source-1');
+
+      expect(result.message.id).toBe('msg-source-1');
+      expect(result.message.from).toBe('628100000001@c.us');
+      expect(result.total).toBe(2);
+      expect(result.replies).toHaveLength(2);
+      expect(result.replies.map(message => message.id)).toEqual(['msg-reply-1', 'msg-reply-2']);
+      expect(result.replies[1].from).toBe('628100000003@c.us');
+    });
+
+    it('should throw when source message is not found', async () => {
+      (repository.findOne as jest.Mock).mockResolvedValue(null);
+
+      await expect(service.getRepliesToMessage('sess-1', 'missing-msg')).rejects.toThrow(
+        "Message 'missing-msg' not found in session 'sess-1'",
       );
     });
   });

@@ -60,6 +60,19 @@ export class MessageController {
     return this.messageService.getMessageById(sessionId, messageId);
   }
 
+  @Get(':messageId/replies')
+  @ApiOperation({ summary: 'Get all replies to a specific message ID' })
+  @ApiParam({ name: 'sessionId', description: 'Session ID' })
+  @ApiParam({ name: 'messageId', description: 'Message UUID or waMessageId to find replies for' })
+  @ApiResponse({
+    status: 200,
+    description: 'All messages in this session that reply to the target message',
+  })
+  @ApiResponse({ status: 404, description: 'Message not found' })
+  async getRepliesToMessage(@Param('sessionId') sessionId: string, @Param('messageId') messageId: string) {
+    return this.messageService.getRepliesToMessage(sessionId, messageId);
+  }
+
   @Post('send-text')
   @RequireRole(ApiKeyRole.OPERATOR)
   @ApiOperation({ summary: 'Send a text message' })

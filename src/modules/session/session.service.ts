@@ -580,11 +580,25 @@ export class SessionService implements OnModuleDestroy, OnModuleInit {
             ? payload.from
             : 'unknown';
 
+      const rawFrom = typeof payload.from === 'string' ? payload.from : '';
+      const author = typeof payload.author === 'string' ? payload.author : '';
+      const userId = typeof payload.userId === 'string' ? payload.userId : '';
+      const isGroupMessage =
+        (typeof payload.isGroup === 'boolean' && payload.isGroup) ||
+        chatId.endsWith('@g.us') ||
+        rawFrom.endsWith('@g.us');
+
+      const senderCandidates = [author, userId, rawFrom].filter(
+        value => typeof value === 'string' && value.length > 0 && !value.endsWith('@g.us'),
+      );
+
+      const senderId = isGroupMessage ? (senderCandidates[0] ?? 'unknown') : rawFrom || userId || author || 'unknown';
+
       const incoming = this.messageRepository.create({
         sessionId,
         waMessageId,
         chatId,
-        from: typeof payload.from === 'string' ? payload.from : 'unknown',
+        from: senderId,
         to: typeof payload.to === 'string' ? payload.to : '',
         body: typeof payload.body === 'string' ? payload.body : '',
         type: typeof payload.type === 'string' ? payload.type : 'text',

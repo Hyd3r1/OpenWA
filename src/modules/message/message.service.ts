@@ -226,7 +226,10 @@ export class MessageService {
     }
 
     const [messages, total] = await query.getManyAndCount();
-    return { messages, total };
+    return {
+      messages: messages.map(message => this.normalizeMessageSender(message)),
+      total,
+    };
   }
 
   async getMessageById(
@@ -259,12 +262,61 @@ export class MessageService {
           : null;
 
     const quotedMessageBody = quotedMessage && typeof quotedMessage.body === 'string' ? quotedMessage.body : null;
+    const normalizedMessage = this.normalizeMessageSender(message);
 
     return {
-      ...message,
+      ...normalizedMessage,
       hasReply: !!quotedMessageId,
       quotedMessageId,
       quotedMessageBody,
+    };
+  }
+
+  async getRepliesToMessage(
+    sessionId: string,
+    messageId: string,
+  ): Promise<{ message: Message; replies: Message[]; total: number }> {
+    const sourceMessage = await this.messageRepository.findOne({
+      where: [
+        { sessionId, id: messageId },
+        { sessionId, waMessageId: messageId },
+      ],
+      order: { createdAt: 'DESC' },
+    });
+
+    if (!sourceMessage) {
+      throw new NotFoundException(`Message '${messageId}' not found in session '${sessionId}'`);
+    }
+
+    const candidateQuotedIds = new Set<string>(
+      [messageId, sourceMessage.id, sourceMessage.waMessageId].filter(
+        (id): id is string => typeof id === 'string' && id.length > 0,
+      ),
+    );
+
+    const sessionMessages = await this.messageRepository.find({
+      where: { sessionId },
+      order: { createdAt: 'ASC' },
+    });
+
+    const replies = sessionMessages.filter(message => {
+      if (message.id === sourceMessage.id) {
+        return false;
+      }
+
+      const metadata = this.parseMetadata(message.metadata);
+      const quotedMessageId =
+        typeof metadata.quotedMessageId === 'string' && metadata.quotedMessageId.length > 0
+          ? metadata.quotedMessageId
+          : null;
+
+      return quotedMessageId !== null && candidateQuotedIds.has(quotedMessageId);
+    });
+
+    return {
+      message: this.normalizeMessageSender(sourceMessage),
+      replies: replies.map(message => this.normalizeMessageSender(message)),
+      total: replies.length,
     };
   }
 
@@ -592,5 +644,40 @@ export class MessageService {
     }
 
     return {};
+  }
+
+  private normalizeMessageSender(message: Message): Message {
+    const from = typeof message.from === 'string' ? message.from : '';
+    const chatId = typeof message.chatId === 'string' ? message.chatId : '';
+    const isGroupMessage = chatId.endsWith('@g.us') || from.endsWith('@g.us');
+
+    if (!isGroupMessage || !from.endsWith('@g.us')) {
+      return message;
+    }
+
+    const metadata = this.parseMetadata(message.metadata);
+    const senderId = this.resolveGroupSenderId(metadata);
+
+    return {
+      ...message,
+      from: senderId ?? 'unknown',
+    };
+  }
+
+  private resolveGroupSenderId(metadata: Record<string, unknown>): string | null {
+    const candidates = [metadata.author, metadata.userId, metadata.from];
+
+    for (const candidate of candidates) {
+      if (typeof candidate !== 'string') {
+        continue;
+      }
+
+      const value = candidate.trim();
+      if (value && !value.endsWith('@g.us')) {
+        return value;
+      }
+    }
+
+    return null;
   }
 }
