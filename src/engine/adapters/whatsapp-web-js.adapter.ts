@@ -1,5 +1,6 @@
 import { EventEmitter } from 'events';
 import { Client, LocalAuth, MessageMedia } from 'whatsapp-web.js';
+import { promises as fs } from 'fs';
 import * as qrcode from 'qrcode';
 import * as path from 'path';
 import {
@@ -88,22 +89,107 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
         );
       }
 
-      this.client = new Client({
-        authStrategy: new LocalAuth({
-          clientId: this.config.sessionId,
-          dataPath: path.resolve(this.config.sessionDataPath),
-        }),
-        puppeteer: {
-          headless: this.config.puppeteer?.headless ?? true,
-          args: puppeteerArgs,
-        },
-      });
-
-      this.setupEventHandlers();
-      await this.client.initialize();
+      await this.initializeClientWithLockRecovery(puppeteerArgs);
     } catch (error) {
       this.setStatus(EngineStatus.FAILED);
       throw error;
+    }
+  }
+
+  private createClient(puppeteerArgs: string[]): Client {
+    return new Client({
+      authStrategy: new LocalAuth({
+        clientId: this.config.sessionId,
+        dataPath: path.resolve(this.config.sessionDataPath),
+      }),
+      puppeteer: {
+        headless: this.config.puppeteer?.headless ?? true,
+        args: puppeteerArgs,
+      },
+    });
+  }
+
+  private async initializeClientWithLockRecovery(puppeteerArgs: string[]): Promise<void> {
+    try {
+      await this.initializeClient(puppeteerArgs);
+    } catch (error) {
+      if (!this.isChromiumProfileLockError(error)) {
+        throw error;
+      }
+
+      this.logger.warn(
+        'Detected stale Chromium profile lock. Cleaning lock files and retrying initialize once.',
+        {
+          sessionId: this.config.sessionId,
+          action: 'chromium_lock_retry',
+        },
+      );
+
+      await this.clearChromiumSingletonLocks();
+      await this.safeDestroyClient();
+      await this.initializeClient(puppeteerArgs);
+    }
+  }
+
+  private async initializeClient(puppeteerArgs: string[]): Promise<void> {
+    this.client = this.createClient(puppeteerArgs);
+    this.setupEventHandlers();
+    await this.client.initialize();
+  }
+
+  private isChromiumProfileLockError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    return /profile appears to be in use by another chromium process/i.test(message);
+  }
+
+  private getSessionProfilePath(): string {
+    const dataPath = path.resolve(this.config.sessionDataPath);
+    return path.join(dataPath, `session-${this.config.sessionId}`);
+  }
+
+  private async clearChromiumSingletonLocks(): Promise<void> {
+    const profilePath = this.getSessionProfilePath();
+    const singletonFiles = ['SingletonLock', 'SingletonSocket', 'SingletonCookie'];
+    let removed = 0;
+
+    for (const filename of singletonFiles) {
+      const filePath = path.join(profilePath, filename);
+      try {
+        await fs.unlink(filePath);
+        removed += 1;
+      } catch (error) {
+        const fsError = error as NodeJS.ErrnoException;
+        if (fsError.code !== 'ENOENT') {
+          this.logger.warn(`Failed to remove ${filename}`, {
+            sessionId: this.config.sessionId,
+            profilePath,
+            error: fsError.message,
+            action: 'chromium_lock_cleanup_failed',
+          });
+        }
+      }
+    }
+
+    if (removed > 0) {
+      this.logger.warn(`Removed ${removed} stale Chromium lock file(s)`, {
+        sessionId: this.config.sessionId,
+        profilePath,
+        action: 'chromium_lock_cleanup',
+      });
+    }
+  }
+
+  private async safeDestroyClient(): Promise<void> {
+    if (!this.client) {
+      return;
+    }
+
+    try {
+      await this.client.destroy();
+    } catch {
+      // Ignore cleanup errors; we recreate client immediately after.
+    } finally {
+      this.client = null;
     }
   }
 
