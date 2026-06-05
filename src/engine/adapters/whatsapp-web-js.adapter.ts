@@ -58,6 +58,9 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
   private phoneNumber: string | null = null;
   private pushName: string | null = null;
   private callbacks: EngineEventCallbacks = {};
+  private authReadyWatchdog: NodeJS.Timeout | null = null;
+
+  private static readonly AUTH_READY_TIMEOUT_MS = 90000;
 
   constructor(private readonly config: WhatsAppWebJsConfig) {
     super();
@@ -207,19 +210,35 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
     this.client.on('authenticated', () => {
       this.setStatus(EngineStatus.AUTHENTICATING);
       this.qrCode = null;
+      this.scheduleAuthReadyWatchdog();
     });
 
     this.client.on('ready', () => {
       try {
-        const info = this.client?.info;
-        this.phoneNumber = info?.wid?.user || null;
-        this.pushName = info?.pushname || null;
-        this.setStatus(EngineStatus.READY);
-        this.callbacks.onReady?.(this.phoneNumber || '', this.pushName || '');
+        this.promoteReady('ready_event');
       } catch (error) {
         this.logger.error('Error getting client info', String(error));
-        this.setStatus(EngineStatus.READY);
-        this.callbacks.onReady?.('', '');
+        this.promoteReady('ready_event_error');
+      }
+    });
+
+    this.client.on('change_state', state => {
+      const normalized = String(state || '').toUpperCase();
+      this.logger.debug(`WA state changed: ${normalized}`, {
+        sessionId: this.config.sessionId,
+        action: 'wa_state_changed',
+        state: normalized,
+      });
+
+      if (this.status === EngineStatus.AUTHENTICATING && normalized === 'CONNECTED') {
+        void this.tryPromoteReadyFromState('change_state_connected');
+      }
+    });
+
+    this.client.on('loading_screen', percent => {
+      const progress = Number(percent) || 0;
+      if (this.status === EngineStatus.AUTHENTICATING && progress >= 100) {
+        void this.tryPromoteReadyFromState('loading_screen_100');
       }
     });
 
@@ -297,13 +316,95 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
     });
 
     this.client.on('disconnected', reason => {
+      this.clearAuthReadyWatchdog();
       this.setStatus(EngineStatus.DISCONNECTED);
       this.callbacks.onDisconnected?.(reason);
     });
 
     this.client.on('auth_failure', () => {
+      this.clearAuthReadyWatchdog();
       this.setStatus(EngineStatus.FAILED);
       this.callbacks.onDisconnected?.('Authentication failed');
+    });
+  }
+
+  private scheduleAuthReadyWatchdog(): void {
+    this.clearAuthReadyWatchdog();
+    this.authReadyWatchdog = setTimeout(() => {
+      if (this.status === EngineStatus.AUTHENTICATING) {
+        this.logger.warn('Session is still AUTHENTICATING after timeout. Trying READY fallback.', {
+          sessionId: this.config.sessionId,
+          action: 'auth_ready_watchdog_timeout',
+          timeoutMs: WhatsAppWebJsAdapter.AUTH_READY_TIMEOUT_MS,
+        });
+        void this.tryPromoteReadyFromState('auth_ready_watchdog');
+      }
+    }, WhatsAppWebJsAdapter.AUTH_READY_TIMEOUT_MS);
+  }
+
+  private clearAuthReadyWatchdog(): void {
+    if (this.authReadyWatchdog) {
+      clearTimeout(this.authReadyWatchdog);
+      this.authReadyWatchdog = null;
+    }
+  }
+
+  private async tryPromoteReadyFromState(source: string): Promise<void> {
+    if (!this.client || this.status === EngineStatus.READY) {
+      return;
+    }
+
+    let waState = '';
+    try {
+      waState = String(await this.client.getState());
+    } catch (error) {
+      this.logger.debug('Failed to read WA state during READY fallback', {
+        sessionId: this.config.sessionId,
+        action: 'ready_fallback_state_read_failed',
+        source,
+        error: String(error),
+      });
+    }
+
+    const normalizedState = waState.toUpperCase();
+    const hasIdentity = !!this.client.info?.wid?.user;
+    const canPromote = hasIdentity || normalizedState === 'CONNECTED';
+
+    if (!canPromote) {
+      this.logger.debug('Skipping READY fallback because WA state is not connected yet', {
+        sessionId: this.config.sessionId,
+        action: 'ready_fallback_skipped',
+        source,
+        state: normalizedState || 'UNKNOWN',
+      });
+      return;
+    }
+
+    this.logger.warn('Promoting session to READY using fallback path', {
+      sessionId: this.config.sessionId,
+      action: 'ready_fallback_promoted',
+      source,
+      state: normalizedState || 'UNKNOWN',
+      hasIdentity,
+    });
+
+    this.promoteReady(source);
+  }
+
+  private promoteReady(source: string): void {
+    const info = this.client?.info;
+    this.phoneNumber = info?.wid?.user || this.phoneNumber || null;
+    this.pushName = info?.pushname || this.pushName || null;
+    this.clearAuthReadyWatchdog();
+    this.setStatus(EngineStatus.READY);
+    this.callbacks.onReady?.(this.phoneNumber || '', this.pushName || '');
+
+    this.logger.log('Session promoted to READY', {
+      sessionId: this.config.sessionId,
+      action: 'session_ready',
+      source,
+      phone: this.phoneNumber || undefined,
+      pushName: this.pushName || undefined,
     });
   }
 
@@ -324,6 +425,7 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
         // Already destroyed or not initialized - ignore
       }
       this.client = null;
+      this.clearAuthReadyWatchdog();
       this.setStatus(EngineStatus.DISCONNECTED);
     }
   }
@@ -343,6 +445,7 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
         }
       }
       this.client = null;
+      this.clearAuthReadyWatchdog();
       this.setStatus(EngineStatus.DISCONNECTED);
     }
   }
@@ -351,6 +454,7 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
     if (this.client) {
       await this.client.destroy();
       this.client = null;
+      this.clearAuthReadyWatchdog();
       this.setStatus(EngineStatus.DISCONNECTED);
     }
   }
