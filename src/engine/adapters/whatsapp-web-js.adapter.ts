@@ -59,8 +59,10 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
   private pushName: string | null = null;
   private callbacks: EngineEventCallbacks = {};
   private authReadyWatchdog: NodeJS.Timeout | null = null;
+  private authReadyProbe: NodeJS.Timeout | null = null;
 
-  private static readonly AUTH_READY_TIMEOUT_MS = 90000;
+  private static readonly AUTH_READY_TIMEOUT_MS = 15000;
+  private static readonly AUTH_READY_PROBE_INTERVAL_MS = 1000;
 
   constructor(private readonly config: WhatsAppWebJsConfig) {
     super();
@@ -208,9 +210,23 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
     });
 
     this.client.on('authenticated', () => {
-      this.setStatus(EngineStatus.AUTHENTICATING);
       this.qrCode = null;
+
+      // whatsapp-web.js can emit authenticated again after session is already
+      // operational. Do not downgrade READY and restart watchdog in that case.
+      if (this.status === EngineStatus.READY) {
+        this.logger.debug('Ignoring duplicate authenticated event for READY session', {
+          sessionId: this.config.sessionId,
+          action: 'authenticated_ignored_already_ready',
+        });
+        return;
+      }
+
+      this.setStatus(EngineStatus.AUTHENTICATING);
       this.scheduleAuthReadyWatchdog();
+
+      // Try immediate promotion instead of waiting for the first interval tick.
+      void this.tryPromoteReadyFromState('authenticated_event');
     });
 
     this.client.on('ready', () => {
@@ -330,19 +346,51 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
 
   private scheduleAuthReadyWatchdog(): void {
     this.clearAuthReadyWatchdog();
-    this.authReadyWatchdog = setTimeout(() => {
+
+    // Kick off a near-immediate probe to minimize perceived login latency.
+    setTimeout(() => {
+      if (this.status === EngineStatus.AUTHENTICATING) {
+        void this.tryPromoteReadyFromState('auth_ready_probe_initial');
+      }
+    }, 250);
+
+    this.authReadyProbe = setInterval(() => {
+      if (this.status === EngineStatus.AUTHENTICATING) {
+        void this.tryPromoteReadyFromState('auth_ready_probe');
+      }
+    }, WhatsAppWebJsAdapter.AUTH_READY_PROBE_INTERVAL_MS);
+
+    this.authReadyWatchdog = setTimeout(async () => {
       if (this.status === EngineStatus.AUTHENTICATING) {
         this.logger.warn('Session is still AUTHENTICATING after timeout. Trying READY fallback.', {
           sessionId: this.config.sessionId,
           action: 'auth_ready_watchdog_timeout',
           timeoutMs: WhatsAppWebJsAdapter.AUTH_READY_TIMEOUT_MS,
         });
-        void this.tryPromoteReadyFromState('auth_ready_watchdog');
+
+        await this.tryPromoteReadyFromState('auth_ready_watchdog');
+      }
+
+      if (this.status === EngineStatus.AUTHENTICATING) {
+        this.logger.warn('Session is still AUTHENTICATING after fallback. Triggering reconnect.', {
+          sessionId: this.config.sessionId,
+          action: 'auth_ready_watchdog_failed',
+          timeoutMs: WhatsAppWebJsAdapter.AUTH_READY_TIMEOUT_MS,
+        });
+
+        this.clearAuthReadyWatchdog();
+        this.setStatus(EngineStatus.FAILED);
+        this.callbacks.onDisconnected?.('Authentication timeout waiting for READY event');
       }
     }, WhatsAppWebJsAdapter.AUTH_READY_TIMEOUT_MS);
   }
 
   private clearAuthReadyWatchdog(): void {
+    if (this.authReadyProbe) {
+      clearInterval(this.authReadyProbe);
+      this.authReadyProbe = null;
+    }
+
     if (this.authReadyWatchdog) {
       clearTimeout(this.authReadyWatchdog);
       this.authReadyWatchdog = null;
@@ -368,7 +416,18 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
 
     const normalizedState = waState.toUpperCase();
     const hasIdentity = !!this.client.info?.wid?.user;
-    const canPromote = hasIdentity || normalizedState === 'CONNECTED';
+
+    let hasWorkingClient = false;
+    if (!hasIdentity && normalizedState !== 'CONNECTED') {
+      try {
+        await this.client.getChats();
+        hasWorkingClient = true;
+      } catch {
+        hasWorkingClient = false;
+      }
+    }
+
+    const canPromote = hasIdentity || normalizedState === 'CONNECTED' || hasWorkingClient;
 
     if (!canPromote) {
       this.logger.debug('Skipping READY fallback because WA state is not connected yet', {
@@ -386,12 +445,22 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
       source,
       state: normalizedState || 'UNKNOWN',
       hasIdentity,
+      hasWorkingClient,
     });
 
     this.promoteReady(source);
   }
 
   private promoteReady(source: string): void {
+    if (this.status === EngineStatus.READY) {
+      this.logger.debug('Skipping duplicate READY promotion', {
+        sessionId: this.config.sessionId,
+        action: 'session_ready_duplicate_ignored',
+        source,
+      });
+      return;
+    }
+
     const info = this.client?.info;
     this.phoneNumber = info?.wid?.user || this.phoneNumber || null;
     this.pushName = info?.pushname || this.pushName || null;
@@ -910,49 +979,71 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
   async addLabelToChat(chatId: string, labelId: string): Promise<void> {
     this.ensureReady();
     const chat = await this.client!.getChatById(chatId);
-    await (chat as unknown as GroupChat).addLabel(labelId);
+    const typedChat = chat as unknown as GroupChat;
+    const currentLabels = await typedChat.getLabels();
+    const labelIds = new Set((currentLabels || []).map(label => String(label.id)));
+    labelIds.add(labelId);
+    await typedChat.changeLabels(Array.from(labelIds));
     this.logger.log(`Added label ${labelId} to chat ${chatId}`);
   }
 
   async removeLabelFromChat(chatId: string, labelId: string): Promise<void> {
     this.ensureReady();
     const chat = await this.client!.getChatById(chatId);
-    await (chat as unknown as GroupChat).removeLabel(labelId);
+    const typedChat = chat as unknown as GroupChat;
+    const currentLabels = await typedChat.getLabels();
+    const nextLabelIds = (currentLabels || [])
+      .map(label => String(label.id))
+      .filter(existingId => existingId !== labelId);
+    await typedChat.changeLabels(nextLabelIds);
     this.logger.log(`Removed label ${labelId} from chat ${chatId}`);
   }
 
   // Channels/Newsletter (Phase 3)
-  async getSubscribedChannels(): Promise<Channel[]> {
-    this.ensureReady();
-    const channels = await (this.client as unknown as BusinessClient).getChannels();
-    if (!channels) {
-      return [];
-    }
-    return channels.map((ch: WwjsChannelData) => ({
+  private mapChannelData(ch: WwjsChannelData): Channel {
+    return {
       id: String(typeof ch.id === 'object' ? ch.id._serialized : ch.id),
       name: String(ch.name || ''),
       description: ch.description ? String(ch.description) : undefined,
       inviteCode: ch.inviteCode ? String(ch.inviteCode) : undefined,
       subscriberCount: ch.subscriberCount ? Number(ch.subscriberCount) : undefined,
       verified: ch.verified ? Boolean(ch.verified) : undefined,
-    }));
+    };
+  }
+
+  async getSubscribedChannels(): Promise<Channel[]> {
+    this.ensureReady();
+    const businessClient = this.client as unknown as BusinessClient;
+    if (typeof businessClient.getChannels !== 'function') {
+      this.logger.warn('Channels API is not available in this whatsapp-web.js version');
+      return [];
+    }
+
+    const channels = await businessClient.getChannels();
+    if (!channels) {
+      return [];
+    }
+
+    return channels.map((ch: WwjsChannelData) => this.mapChannelData(ch));
   }
 
   async getChannelById(channelId: string): Promise<Channel | null> {
     this.ensureReady();
     try {
-      const ch = await (this.client as unknown as BusinessClient).getChannelById(channelId);
-      if (!ch) {
+      const chat = await this.client!.getChatById(channelId);
+      const channelData = chat as unknown as WwjsChannelData;
+      const serializedId = String((chat as unknown as { id?: { _serialized?: string } }).id?._serialized || channelId);
+
+      const isChannelLike =
+        serializedId.endsWith('@newsletter') ||
+        typeof channelData.subscriberCount !== 'undefined' ||
+        typeof channelData.inviteCode !== 'undefined';
+
+      if (!isChannelLike) {
         return null;
       }
-      return {
-        id: String(typeof ch.id === 'object' ? ch.id._serialized : ch.id),
-        name: String(ch.name || ''),
-        description: ch.description ? String(ch.description) : undefined,
-        inviteCode: ch.inviteCode ? String(ch.inviteCode) : undefined,
-        subscriberCount: ch.subscriberCount ? Number(ch.subscriberCount) : undefined,
-        verified: ch.verified ? Boolean(ch.verified) : undefined,
-      };
+
+      return this.mapChannelData(channelData);
     } catch (error) {
       this.logger.warn(`Failed to get channel: ${channelId}`, String(error));
       return null;
@@ -961,29 +1052,48 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
 
   async subscribeToChannel(inviteCode: string): Promise<Channel> {
     this.ensureReady();
-    const ch = await (this.client as unknown as BusinessClient).subscribeToChannel(inviteCode);
+    const businessClient = this.client as unknown as BusinessClient;
+
+    if (
+      typeof businessClient.getChannelByInviteCode !== 'function' ||
+      typeof businessClient.subscribeToChannel !== 'function'
+    ) {
+      throw new Error('Channel subscriptions are not supported by installed whatsapp-web.js version');
+    }
+
+    const channel = await businessClient.getChannelByInviteCode(inviteCode);
+    if (!channel) {
+      throw new Error(`Channel with invite code ${inviteCode} not found`);
+    }
+
+    const channelId = String(typeof channel.id === 'object' ? channel.id._serialized : channel.id);
+    await businessClient.subscribeToChannel(channelId);
     this.logger.log(`Subscribed to channel with invite code: ${inviteCode}`);
-    return {
-      id: String(typeof ch.id === 'object' ? ch.id._serialized : ch.id),
-      name: String(ch.name || ''),
-      description: ch.description ? String(ch.description) : undefined,
-    };
+    return this.mapChannelData(channel);
   }
 
   async unsubscribeFromChannel(channelId: string): Promise<void> {
     this.ensureReady();
-    await (this.client as unknown as BusinessClient).unsubscribeFromChannel(channelId);
+    const businessClient = this.client as unknown as BusinessClient;
+    if (typeof businessClient.unsubscribeFromChannel !== 'function') {
+      throw new Error('Channel subscriptions are not supported by installed whatsapp-web.js version');
+    }
+
+    await businessClient.unsubscribeFromChannel(channelId);
     this.logger.log(`Unsubscribed from channel: ${channelId}`);
   }
 
   async getChannelMessages(channelId: string, limit: number = 50): Promise<ChannelMessage[]> {
     this.ensureReady();
     try {
-      const ch = await (this.client as unknown as BusinessClient).getChannelById(channelId);
-      if (!ch) {
-        throw new Error(`Channel ${channelId} not found`);
+      const chat = await this.client!.getChatById(channelId);
+      const channel = chat as unknown as WwjsChannelData;
+
+      if (typeof channel.fetchMessages !== 'function') {
+        throw new Error('Channel messages are not supported by installed whatsapp-web.js version');
       }
-      const messages = await ch.fetchMessages({ limit });
+
+      const messages = await channel.fetchMessages({ limit });
       if (!messages) {
         return [];
       }

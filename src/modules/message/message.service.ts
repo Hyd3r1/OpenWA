@@ -254,12 +254,7 @@ export class MessageService {
         ? (metadata.quotedMessage as Record<string, unknown>)
         : null;
 
-    const quotedMessageId =
-      typeof metadata.quotedMessageId === 'string'
-        ? metadata.quotedMessageId
-        : quotedMessage && typeof quotedMessage.id === 'string'
-          ? quotedMessage.id
-          : null;
+    const quotedMessageId = this.extractQuotedMessageId(metadata);
 
     const quotedMessageBody = quotedMessage && typeof quotedMessage.body === 'string' ? quotedMessage.body : null;
     const normalizedMessage = this.normalizeMessageSender(message);
@@ -276,10 +271,54 @@ export class MessageService {
     sessionId: string,
     messageId: string,
   ): Promise<{ message: Message; replies: Message[]; total: number }> {
-    const sourceMessage = await this.findMessageRecordByAnyId(sessionId, messageId);
+    const sessionMessages = await this.messageRepository.find({
+      where: { sessionId },
+      order: { createdAt: 'ASC' },
+    });
 
+    const sourceMessage = this.findMessageInCollectionByAnyId(sessionMessages, messageId);
+
+    // Resolve the thread root (mother message): climb parent links until no parent is found.
+    // If parent is missing from local history, use a virtual root based on quotedMessageId.
+    let rootMessage = sourceMessage;
+    let rootMessageId = messageId;
+
+    if (sourceMessage) {
+      rootMessageId = sourceMessage.waMessageId || sourceMessage.id || messageId;
+
+      const visited = new Set<string>();
+      let current: Message | null = sourceMessage;
+
+      while (current) {
+        const currentComparableId = this.normalizeComparableMessageId(current.waMessageId || current.id || '');
+        if (currentComparableId) {
+          if (visited.has(currentComparableId)) {
+            break;
+          }
+          visited.add(currentComparableId);
+        }
+
+        const parentQuotedId = this.extractQuotedMessageId(this.parseMetadata(current.metadata));
+        if (!parentQuotedId) {
+          break;
+        }
+
+        const parentMessage = this.findMessageInCollectionByAnyId(sessionMessages, parentQuotedId);
+        if (!parentMessage) {
+          rootMessage = null;
+          rootMessageId = parentQuotedId;
+          break;
+        }
+
+        rootMessage = parentMessage;
+        rootMessageId = parentMessage.waMessageId || parentMessage.id || parentQuotedId;
+        current = parentMessage;
+      }
+    }
+
+    // Collect all descendants recursively: replies to root and replies to replies.
     const candidateQuotedIds = new Set<string>();
-    for (const id of [messageId, sourceMessage?.id, sourceMessage?.waMessageId]) {
+    for (const id of [rootMessageId, rootMessage?.id, rootMessage?.waMessageId]) {
       if (typeof id !== 'string' || id.length === 0) {
         continue;
       }
@@ -288,35 +327,56 @@ export class MessageService {
       }
     }
 
-    const sessionMessages = await this.messageRepository.find({
-      where: { sessionId },
-      order: { createdAt: 'ASC' },
-    });
+    const includedReplyIds = new Set<string>();
+    const replies: Message[] = [];
+    let expanded = true;
 
-    const replies = sessionMessages.filter(message => {
-      if (sourceMessage && message.id === sourceMessage.id) {
-        return false;
+    while (expanded) {
+      expanded = false;
+
+      for (const message of sessionMessages) {
+        if (rootMessage && message.id === rootMessage.id) {
+          continue;
+        }
+
+        if (includedReplyIds.has(message.id)) {
+          continue;
+        }
+
+        const quotedMessageId = this.extractQuotedMessageId(this.parseMetadata(message.metadata));
+        if (!quotedMessageId) {
+          continue;
+        }
+
+        if (!candidateQuotedIds.has(this.normalizeComparableMessageId(quotedMessageId))) {
+          continue;
+        }
+
+        replies.push(message);
+        includedReplyIds.add(message.id);
+        expanded = true;
+
+        for (const id of [message.id, message.waMessageId]) {
+          if (typeof id !== 'string' || id.length === 0) {
+            continue;
+          }
+          for (const variant of this.getMessageIdVariants(id)) {
+            candidateQuotedIds.add(this.normalizeComparableMessageId(variant));
+          }
+        }
       }
+    }
 
-      const metadata = this.parseMetadata(message.metadata);
-      const quotedMessageId =
-        typeof metadata.quotedMessageId === 'string' && metadata.quotedMessageId.length > 0
-          ? metadata.quotedMessageId
-          : null;
-
-      return quotedMessageId !== null && candidateQuotedIds.has(this.normalizeComparableMessageId(quotedMessageId));
-    });
-
-    if (!sourceMessage && replies.length === 0) {
+    if (!rootMessage && replies.length === 0) {
       throw new NotFoundException(`Message '${messageId}' not found in session '${sessionId}'`);
     }
 
-    const source: Message = sourceMessage ?? {
-      id: messageId,
+    const source: Message = rootMessage ?? {
+      id: rootMessageId,
       sessionId,
-      waMessageId: messageId,
-      chatId: this.extractChatIdFromWaMessageId(messageId) ?? replies[0]?.chatId ?? 'unknown',
-      from: this.extractChatIdFromWaMessageId(messageId) ?? 'unknown',
+      waMessageId: rootMessageId,
+      chatId: this.extractChatIdFromWaMessageId(rootMessageId) ?? replies[0]?.chatId ?? 'unknown',
+      from: this.extractChatIdFromWaMessageId(rootMessageId) ?? 'unknown',
       to: '',
       body: '',
       type: 'text',
@@ -655,6 +715,53 @@ export class MessageService {
     }
 
     return {};
+  }
+
+  private extractQuotedMessageId(metadata: Record<string, unknown>): string | null {
+    const quotedMessage =
+      metadata.quotedMessage && typeof metadata.quotedMessage === 'object'
+        ? (metadata.quotedMessage as Record<string, unknown>)
+        : null;
+
+    if (typeof metadata.quotedMessageId === 'string') {
+      const quotedMessageId = metadata.quotedMessageId.trim();
+      if (quotedMessageId.length > 0) {
+        return quotedMessageId;
+      }
+    }
+
+    if (quotedMessage && typeof quotedMessage.id === 'string') {
+      const quotedMessageId = quotedMessage.id.trim();
+      if (quotedMessageId.length > 0) {
+        return quotedMessageId;
+      }
+    }
+
+    return null;
+  }
+
+  private findMessageInCollectionByAnyId(messages: Message[], messageId: string): Message | null {
+    const comparableVariants = new Set(
+      this.getMessageIdVariants(messageId).map(variant => this.normalizeComparableMessageId(variant)),
+    );
+
+    if (comparableVariants.size === 0) {
+      return null;
+    }
+
+    for (const message of messages) {
+      for (const value of [message.id, message.waMessageId]) {
+        if (typeof value !== 'string' || value.length === 0) {
+          continue;
+        }
+
+        if (comparableVariants.has(this.normalizeComparableMessageId(value))) {
+          return message;
+        }
+      }
+    }
+
+    return null;
   }
 
   private async findMessageRecordByAnyId(sessionId: string, messageId: string): Promise<Message | null> {

@@ -422,6 +422,56 @@ describe('MessageService', () => {
       expect(result.replies[1].from).toBe('628100000003@c.us');
     });
 
+    it('should return mother message and all descendant replies when called with reply id', async () => {
+      const root = {
+        id: 'msg-root',
+        sessionId: 'sess-1',
+        waMessageId: 'wa-root',
+        chatId: '1203630@g.us',
+        from: '1203630@g.us',
+        metadata: { userId: '628100000001@c.us' },
+      } as Message;
+
+      const replyLevel1 = {
+        id: 'msg-reply-l1',
+        sessionId: 'sess-1',
+        waMessageId: 'wa-reply-l1',
+        chatId: '1203630@g.us',
+        from: '1203630@g.us',
+        metadata: { quotedMessageId: 'wa-root', author: '628100000002@c.us' },
+      } as Message;
+
+      const replyLevel2 = {
+        id: 'msg-reply-l2',
+        sessionId: 'sess-1',
+        waMessageId: 'wa-reply-l2',
+        chatId: '1203630@g.us',
+        from: '1203630@g.us',
+        metadata: { quotedMessageId: 'wa-reply-l1', author: '628100000003@c.us' },
+      } as Message;
+
+      const siblingReply = {
+        id: 'msg-reply-sibling',
+        sessionId: 'sess-1',
+        waMessageId: 'wa-reply-sibling',
+        chatId: '1203630@g.us',
+        from: '1203630@g.us',
+        metadata: { quotedMessageId: 'wa-root', author: '628100000004@c.us' },
+      } as Message;
+
+      (repository.find as jest.Mock).mockResolvedValue([root, replyLevel1, replyLevel2, siblingReply]);
+
+      const result = await service.getRepliesToMessage('sess-1', 'wa-reply-l1');
+
+      expect(result.message.id).toBe('msg-root');
+      expect(result.message.from).toBe('628100000001@c.us');
+      expect(result.total).toBe(3);
+      expect(result.replies.map(message => message.id)).toEqual(['msg-reply-l1', 'msg-reply-l2', 'msg-reply-sibling']);
+      expect(result.replies[0].from).toBe('628100000002@c.us');
+      expect(result.replies[1].from).toBe('628100000003@c.us');
+      expect(result.replies[2].from).toBe('628100000004@c.us');
+    });
+
     it('should throw when source message is not found and no replies reference it', async () => {
       (repository.findOne as jest.Mock).mockResolvedValue(null);
       (repository.find as jest.Mock).mockResolvedValue([]);
