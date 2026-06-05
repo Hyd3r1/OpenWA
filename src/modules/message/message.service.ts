@@ -311,26 +311,24 @@ export class MessageService {
       throw new NotFoundException(`Message '${messageId}' not found in session '${sessionId}'`);
     }
 
-    const source =
-      sourceMessage ??
-      ({
-        id: messageId,
-        sessionId,
-        waMessageId: messageId,
-        chatId: this.extractChatIdFromWaMessageId(messageId) ?? replies[0]?.chatId ?? 'unknown',
-        from: this.extractChatIdFromWaMessageId(messageId) ?? 'unknown',
-        to: '',
-        body: '',
-        type: 'text',
-        direction: MessageDirection.INCOMING,
-        timestamp: undefined,
-        status: MessageStatus.DELIVERED,
-        metadata: {
-          virtual: true,
-          source: 'replies-fallback',
-        },
-        createdAt: new Date(),
-      } as Message);
+    const source: Message = sourceMessage ?? {
+      id: messageId,
+      sessionId,
+      waMessageId: messageId,
+      chatId: this.extractChatIdFromWaMessageId(messageId) ?? replies[0]?.chatId ?? 'unknown',
+      from: this.extractChatIdFromWaMessageId(messageId) ?? 'unknown',
+      to: '',
+      body: '',
+      type: 'text',
+      direction: MessageDirection.INCOMING,
+      timestamp: Date.now(),
+      status: MessageStatus.DELIVERED,
+      metadata: {
+        virtual: true,
+        source: 'replies-fallback',
+      },
+      createdAt: new Date(),
+    };
 
     return {
       message: this.normalizeMessageSender(source),
@@ -671,19 +669,19 @@ export class MessageService {
     });
   }
 
-  private extractChatIdFromWaMessageId(messageId: string): string | null {
+  private extractChatIdFromWaMessageId(messageId: string): string | undefined {
     if (!messageId) {
-      return null;
+      return undefined;
     }
 
     const match = messageId.match(/^(?:true|false)_([^_]+)_/);
     if (!match) {
-      return null;
+      return undefined;
     }
 
     const chatId = match[1]?.trim();
     if (!chatId || !chatId.includes('@')) {
-      return null;
+      return undefined;
     }
 
     return chatId;
