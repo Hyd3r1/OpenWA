@@ -117,13 +117,10 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
         throw error;
       }
 
-      this.logger.warn(
-        'Detected stale Chromium profile lock. Cleaning lock files and retrying initialize once.',
-        {
-          sessionId: this.config.sessionId,
-          action: 'chromium_lock_retry',
-        },
-      );
+      this.logger.warn('Detected stale Chromium profile lock. Cleaning lock files and retrying initialize once.', {
+        sessionId: this.config.sessionId,
+        action: 'chromium_lock_retry',
+      });
 
       await this.clearChromiumSingletonLocks();
       await this.safeDestroyClient();

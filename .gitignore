@@ -3,6 +3,8 @@ node_modules/
 .pnp
 .pnp.js
 
+OpenWA-n8n/
+
 # Build output
 dist/
 build/
