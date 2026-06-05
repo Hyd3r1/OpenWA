@@ -266,6 +266,43 @@ describe('MessageService', () => {
     });
   });
 
+  describe('replyByMessageId', () => {
+    it('should resolve chatId from true/false waMessageId variant in history', async () => {
+      (repository.findOne as jest.Mock).mockResolvedValue({
+        id: 'msg-1',
+        sessionId: 'sess-1',
+        chatId: '120363428197612227@g.us',
+        waMessageId: 'false_120363428197612227@g.us_AC43337BF527A7BE9CF1A5659EAC8C94_193140870930523@lid',
+      } as Message);
+
+      await service.replyByMessageId('sess-1', {
+        quotedMessageId: 'true_120363428197612227@g.us_AC43337BF527A7BE9CF1A5659EAC8C94_193140870930523@lid',
+        text: 'reply test',
+      });
+
+      expect(mockEngine.replyToMessage).toHaveBeenCalledWith(
+        '120363428197612227@g.us',
+        'true_120363428197612227@g.us_AC43337BF527A7BE9CF1A5659EAC8C94_193140870930523@lid',
+        'reply test',
+      );
+    });
+
+    it('should resolve chatId directly from waMessageId format when history is missing', async () => {
+      (repository.findOne as jest.Mock).mockResolvedValue(null);
+
+      await service.replyByMessageId('sess-1', {
+        quotedMessageId: 'false_120363428197612227@g.us_AC43337BF527A7BE9CF1A5659EAC8C94_193140870930523@lid',
+        text: 'fallback reply',
+      });
+
+      expect(mockEngine.replyToMessage).toHaveBeenCalledWith(
+        '120363428197612227@g.us',
+        'false_120363428197612227@g.us_AC43337BF527A7BE9CF1A5659EAC8C94_193140870930523@lid',
+        'fallback reply',
+      );
+    });
+  });
+
   describe('forward', () => {
     it('should call engine.forwardMessage with from/to chats', async () => {
       await service.forward('sess-1', {
@@ -339,7 +376,7 @@ describe('MessageService', () => {
       const sourceMessage = {
         id: 'msg-source-1',
         sessionId: 'sess-1',
-        waMessageId: 'wa-source-1',
+        waMessageId: 'false_120363428197612227@g.us_AC43337BF527A7BE9CF1A5659EAC8C94_193140870930523@lid',
         chatId: '1203630@g.us',
         from: '1203630@g.us',
         metadata: { userId: '628100000001@c.us' },
@@ -356,7 +393,9 @@ describe('MessageService', () => {
         sessionId: 'sess-1',
         chatId: '1203630@g.us',
         from: '1203630@g.us',
-        metadata: { quotedMessageId: 'wa-source-1' },
+        metadata: {
+          quotedMessageId: 'false_120363428197612227@g.us_AC43337BF527A7BE9CF1A5659EAC8C94_193140870930523@lid',
+        },
       } as Message;
 
       const replyTwo = {
@@ -370,7 +409,10 @@ describe('MessageService', () => {
       (repository.findOne as jest.Mock).mockResolvedValue(sourceMessage);
       (repository.find as jest.Mock).mockResolvedValue([sourceMessage, unrelated, replyOne, replyTwo]);
 
-      const result = await service.getRepliesToMessage('sess-1', 'wa-source-1');
+      const result = await service.getRepliesToMessage(
+        'sess-1',
+        'true_120363428197612227@g.us_AC43337BF527A7BE9CF1A5659EAC8C94_193140870930523@lid',
+      );
 
       expect(result.message.id).toBe('msg-source-1');
       expect(result.message.from).toBe('628100000001@c.us');
@@ -380,12 +422,42 @@ describe('MessageService', () => {
       expect(result.replies[1].from).toBe('628100000003@c.us');
     });
 
-    it('should throw when source message is not found', async () => {
+    it('should throw when source message is not found and no replies reference it', async () => {
       (repository.findOne as jest.Mock).mockResolvedValue(null);
+      (repository.find as jest.Mock).mockResolvedValue([]);
 
       await expect(service.getRepliesToMessage('sess-1', 'missing-msg')).rejects.toThrow(
         "Message 'missing-msg' not found in session 'sess-1'",
       );
+    });
+
+    it('should return replies even when source message is missing from history', async () => {
+      (repository.findOne as jest.Mock).mockResolvedValue(null);
+      (repository.find as jest.Mock).mockResolvedValue([
+        {
+          id: 'msg-reply-only-1',
+          sessionId: 'sess-1',
+          chatId: '120363428197612227@g.us',
+          from: '120363428197612227@g.us',
+          metadata: {
+            quotedMessageId: 'false_120363428197612227@g.us_AC43337BF527A7BE9CF1A5659EAC8C94_193140870930523@lid',
+            author: '193140870930523@lid',
+          },
+        } as Message,
+      ]);
+
+      const result = await service.getRepliesToMessage(
+        'sess-1',
+        'true_120363428197612227@g.us_AC43337BF527A7BE9CF1A5659EAC8C94_193140870930523@lid',
+      );
+
+      expect(result.total).toBe(1);
+      expect(result.replies[0].id).toBe('msg-reply-only-1');
+      expect(result.replies[0].from).toBe('193140870930523@lid');
+      expect(result.message.waMessageId).toBe(
+        'true_120363428197612227@g.us_AC43337BF527A7BE9CF1A5659EAC8C94_193140870930523@lid',
+      );
+      expect(result.message.chatId).toBe('120363428197612227@g.us');
     });
   });
 

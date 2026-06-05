@@ -276,23 +276,17 @@ export class MessageService {
     sessionId: string,
     messageId: string,
   ): Promise<{ message: Message; replies: Message[]; total: number }> {
-    const sourceMessage = await this.messageRepository.findOne({
-      where: [
-        { sessionId, id: messageId },
-        { sessionId, waMessageId: messageId },
-      ],
-      order: { createdAt: 'DESC' },
-    });
+    const sourceMessage = await this.findMessageRecordByAnyId(sessionId, messageId);
 
-    if (!sourceMessage) {
-      throw new NotFoundException(`Message '${messageId}' not found in session '${sessionId}'`);
+    const candidateQuotedIds = new Set<string>();
+    for (const id of [messageId, sourceMessage?.id, sourceMessage?.waMessageId]) {
+      if (typeof id !== 'string' || id.length === 0) {
+        continue;
+      }
+      for (const variant of this.getMessageIdVariants(id)) {
+        candidateQuotedIds.add(this.normalizeComparableMessageId(variant));
+      }
     }
-
-    const candidateQuotedIds = new Set<string>(
-      [messageId, sourceMessage.id, sourceMessage.waMessageId].filter(
-        (id): id is string => typeof id === 'string' && id.length > 0,
-      ),
-    );
 
     const sessionMessages = await this.messageRepository.find({
       where: { sessionId },
@@ -300,7 +294,7 @@ export class MessageService {
     });
 
     const replies = sessionMessages.filter(message => {
-      if (message.id === sourceMessage.id) {
+      if (sourceMessage && message.id === sourceMessage.id) {
         return false;
       }
 
@@ -310,11 +304,39 @@ export class MessageService {
           ? metadata.quotedMessageId
           : null;
 
-      return quotedMessageId !== null && candidateQuotedIds.has(quotedMessageId);
+      return (
+        quotedMessageId !== null &&
+        candidateQuotedIds.has(this.normalizeComparableMessageId(quotedMessageId))
+      );
     });
 
+    if (!sourceMessage && replies.length === 0) {
+      throw new NotFoundException(`Message '${messageId}' not found in session '${sessionId}'`);
+    }
+
+    const source =
+      sourceMessage ??
+      ({
+        id: messageId,
+        sessionId,
+        waMessageId: messageId,
+        chatId: this.extractChatIdFromWaMessageId(messageId) ?? replies[0]?.chatId ?? 'unknown',
+        from: this.extractChatIdFromWaMessageId(messageId) ?? 'unknown',
+        to: '',
+        body: '',
+        type: 'text',
+        direction: MessageDirection.INCOMING,
+        timestamp: undefined,
+        status: MessageStatus.DELIVERED,
+        metadata: {
+          virtual: true,
+          source: 'replies-fallback',
+        },
+        createdAt: new Date(),
+      } as Message);
+
     return {
-      message: this.normalizeMessageSender(sourceMessage),
+      message: this.normalizeMessageSender(source),
       replies: replies.map(message => this.normalizeMessageSender(message)),
       total: replies.length,
     };
@@ -471,21 +493,15 @@ export class MessageService {
     let targetChatId = dto.chatId;
 
     if (!targetChatId) {
-      const sourceMessage = await this.messageRepository.findOne({
-        where: [
-          { sessionId, waMessageId: dto.quotedMessageId },
-          { sessionId, id: dto.quotedMessageId },
-        ],
-        order: { createdAt: 'DESC' },
-      });
+      const sourceMessage = await this.findMessageRecordByAnyId(sessionId, dto.quotedMessageId);
 
-      if (!sourceMessage?.chatId) {
+      targetChatId = sourceMessage?.chatId ?? this.extractChatIdFromWaMessageId(dto.quotedMessageId);
+
+      if (!targetChatId) {
         throw new NotFoundException(
           `Cannot resolve chat for message '${dto.quotedMessageId}'. Provide chatId or ensure message exists in history.`,
         );
       }
-
-      targetChatId = sourceMessage.chatId;
     }
 
     if (!targetChatId) {
@@ -644,6 +660,56 @@ export class MessageService {
     }
 
     return {};
+  }
+
+  private async findMessageRecordByAnyId(sessionId: string, messageId: string): Promise<Message | null> {
+    const variants = this.getMessageIdVariants(messageId);
+
+    return this.messageRepository.findOne({
+      where: [
+        ...variants.map(variant => ({ sessionId, id: variant })),
+        ...variants.map(variant => ({ sessionId, waMessageId: variant })),
+      ],
+      order: { createdAt: 'DESC' },
+    });
+  }
+
+  private extractChatIdFromWaMessageId(messageId: string): string | null {
+    if (!messageId) {
+      return null;
+    }
+
+    const match = messageId.match(/^(?:true|false)_([^_]+)_/);
+    if (!match) {
+      return null;
+    }
+
+    const chatId = match[1]?.trim();
+    if (!chatId || !chatId.includes('@')) {
+      return null;
+    }
+
+    return chatId;
+  }
+
+  private getMessageIdVariants(messageId: string): string[] {
+    const id = messageId.trim();
+    if (!id) {
+      return [];
+    }
+
+    const variants = new Set<string>([id]);
+    if (id.startsWith('true_')) {
+      variants.add(`false_${id.slice(5)}`);
+    } else if (id.startsWith('false_')) {
+      variants.add(`true_${id.slice(6)}`);
+    }
+
+    return [...variants];
+  }
+
+  private normalizeComparableMessageId(messageId: string): string {
+    return messageId.trim().replace(/^(?:true|false)_/, '');
   }
 
   private normalizeMessageSender(message: Message): Message {
