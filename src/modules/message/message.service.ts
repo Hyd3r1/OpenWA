@@ -304,10 +304,7 @@ export class MessageService {
           ? metadata.quotedMessageId
           : null;
 
-      return (
-        quotedMessageId !== null &&
-        candidateQuotedIds.has(this.normalizeComparableMessageId(quotedMessageId))
-      );
+      return quotedMessageId !== null && candidateQuotedIds.has(this.normalizeComparableMessageId(quotedMessageId));
     });
 
     if (!sourceMessage && replies.length === 0) {
